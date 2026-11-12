@@ -196,6 +196,10 @@ _FETCH_SCRIPT = r"""
 					const body = await resp.text();
 					try {
 						const result = JSON.parse(body);
+						if (result && typeof result === 'object' && !Array.isArray(result)) {
+							result.__cli_http_status__ = resp.status;
+							result.__cli_evidence_source__ = 'upstream_json';
+						}
 						if (result && (result.code === 9 || result.code === '9')) {
 							result.__cli_rate_limit__ = {retry_after: resp.headers.get('Retry-After') || ''};
 						}
@@ -206,7 +210,12 @@ _FETCH_SCRIPT = r"""
 							&& /异常行为|违规访问|暂时被禁止访问/.test(body);
 						const contentType = resp.headers.get('Content-Type') || '';
 						const isHtml = /html/i.test(contentType) || /^\s*(?:<!doctype html|<html)/i.test(body);
+						// 只留布尔标记。正文可能含凭据，不带回 Python，也不从正文里抠数字当业务码。
+						const environmentText = /环境存在异常|访问环境异常|请求环境异常/.test(body);
 						return {code: -1, message: 'browser response is not JSON', zpData: {},
+							__cli_http_status__: resp.status,
+							__cli_evidence_source__: 'non_json',
+							__cli_environment_text__: environmentText,
 							__cli_security_response__: {url: resp.url, content_type: isHtml ? 'text/html' : contentType, title, restricted}};
 					}
 					})()]);
@@ -332,6 +341,9 @@ class BrowserSession:
 					raise_platform_risk_response(result, is_cdp=self._is_cdp)
 				if result.pop("__cli_request_interrupted__", False):
 					return self._interrupted_request_response(endpoint)
+				from boss_agent_cli.api.error_evidence import stash_transport_evidence
+
+				stash_transport_evidence(result)
 			return result
 
 	def _navigate_home(self, *, channel: str | None = None) -> None:
@@ -426,9 +438,7 @@ class BrowserSession:
 						return
 				elif channel == CHANNEL_HEADLESS:
 					self._ensure_playwright()
-					# _start_headless 成功即置 _started，失败抛 playwright 原生异常
-					# 并原样上抛（→ display 兜底 NETWORK_ERROR）。这一支只出现在
-					# auto 的链尾；显式来源不允许此兜底。
+					# 缺内核在 launch 前离线预检；其它启动失败也不再伪装成可重试的网络错误。
 					self._start_headless()
 					return
 				else:  # pragma: no cover - 由门禁 test_every_declared_channel_is_dispatchable 拦住
@@ -667,11 +677,28 @@ class BrowserSession:
 
 	def _start_headless(self) -> None:
 		"""Fallback: launch headless patchright Chromium."""
-		self._browser = self._pw.chromium.launch(
-			headless=True,
-			proxy=resolve_proxy(),
-			args=list(WEBRTC_LEAK_GUARD_ARGS),
-		)
+		from boss_agent_cli.api.error_evidence import BrowserKernelMissing, BrowserStartupError, is_kernel_missing_message
+		from boss_agent_cli.services.browser_runtime import prove_headless_shell_missing
+
+		# 离线预检：缺文件就不要调用 launch。prove_* 不下载、不探网。
+		missing = prove_headless_shell_missing()
+		if missing is not None:
+			raise BrowserKernelMissing(str(missing))
+		try:
+			self._browser = self._pw.chromium.launch(
+				headless=True,
+				proxy=resolve_proxy(),
+				args=list(WEBRTC_LEAK_GUARD_ARGS),
+			)
+		except BrowserKernelMissing:
+			raise
+		except Exception as exc:
+			if is_kernel_missing_message(exc):
+				raise BrowserKernelMissing(str(exc)) from exc
+			from boss_agent_cli.api.error_evidence import public_upstream_text
+
+			safe = public_upstream_text(str(exc)) or type(exc).__name__
+			raise BrowserStartupError(f"浏览器启动失败: {type(exc).__name__}: {safe}") from exc
 		self._context = self._browser.new_context(
 			user_agent=self._user_agent,
 			viewport={"width": 1280, "height": 800},
@@ -860,7 +887,14 @@ class BrowserSession:
 			else "浏览器读取请求中断或超时，请检查页面后恢复",
 			"zpData": {},
 			"__cli_error_code__": code,
-			"__cli_error_details__": {"outcome": "unknown", "replay_safe": False},
+			"__cli_error_details__": {
+				"outcome": "unknown",
+				"replay_safe": False,
+				"origin": "transport",
+				"request_attempted": True,
+				"request_sent": "unknown",
+				"response_received": "unknown",
+			},
 		}
 
 	# ── Arbitrary JS evaluation (CDP-only, raw websocket) ────────────

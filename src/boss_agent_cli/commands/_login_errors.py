@@ -68,6 +68,44 @@ def classify_login_error(exc: Exception, ctx: click.Context) -> dict[str, object
 			"recovery_action": "修正参数",
 		}
 
+	from boss_agent_cli.api.error_evidence import (
+		BrowserKernelMissing,
+		BrowserStartupError,
+		is_kernel_missing_message,
+		kernel_missing_details,
+	)
+
+	if isinstance(exc, BrowserKernelMissing) or is_kernel_missing_message(exc):
+		body = payload(
+			"BROWSER_KERNEL_MISSING",
+			f"patchright 浏览器内核缺失或与所需修订版不匹配: {raw_message}",
+			["patchright install chromium", doctor_cmd, login_cmd],
+			[
+				"这是本机内核缺失，登录请求没有发出。",
+				"本工具不会自动下载浏览器；需要时由你本机显式执行 patchright install chromium，安装完成前不要重试登录。",
+			],
+			recovery="patchright install chromium",
+		)
+		raw_details = getattr(exc, "details", None)
+		body["details"] = raw_details if isinstance(raw_details, dict) else kernel_missing_details()
+		return body
+
+	if isinstance(exc, BrowserStartupError):
+		from boss_agent_cli.display import error_contract_for_code
+
+		start_recoverable, start_action = error_contract_for_code("BROWSER_START_FAILED")
+		return {
+			"code": "BROWSER_START_FAILED",
+			"message": str(exc),
+			"recoverable": start_recoverable,
+			"recovery_action": start_action,
+			"details": exc.details,
+			"hints": {
+				"next_actions": [doctor_cmd],
+				"operator_actions": ["浏览器没有启动，登录请求没有发出。不要自动重试。"],
+			},
+		}
+
 	if isinstance(exc, TimeoutError) or "timeout" in message or "超时" in raw_message:
 		return payload(
 			"LOGIN_TIMEOUT",
@@ -78,15 +116,6 @@ def classify_login_error(exc: Exception, ctx: click.Context) -> dict[str, object
 				"网络较慢时可延长超时时间后重试",
 				"如已打开本机 Chrome，可先启动带调试端口的 Chrome 再重试登录",
 			],
-		)
-
-	if "executable doesn't exist" in message or "playwright was just installed" in message:
-		return payload(
-			"BROWSER_KERNEL_MISSING",
-			f"patchright 浏览器内核缺失或与所需修订版不匹配: {raw_message}",
-			["patchright install chromium", doctor_cmd, login_cmd],
-			["浏览器内核安装完成后重新执行登录"],
-			recovery="patchright install chromium",
 		)
 
 	if "cdp" in message or "chrome" in message or isinstance(exc, ConnectionError):

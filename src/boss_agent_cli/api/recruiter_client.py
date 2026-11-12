@@ -700,7 +700,7 @@ class BossRecruiterClient(_BaseHttpClient):
 			try:
 				raise_platform_risk_response(risk, is_cdp=True)
 			except PlatformRiskError as error:
-				error.details["platform_code"] = risk.get("__cli_platform_code__", int(risk["code"]))
+				error.details.setdefault("platform_code", None)
 				self._record_cdp_risk_lock_raw(error=error)
 		return result, events
 

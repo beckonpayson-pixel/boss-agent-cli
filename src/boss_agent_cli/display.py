@@ -274,8 +274,10 @@ def handle_platform_error_output(
 		cli_details = response.get("__cli_error_details__")
 		if details is None and isinstance(cli_details, dict) and cli_details:
 			details = cli_details
-		if code in RISK_ERROR_CONTRACTS and response.get("code") in (31, "31", 32, "32", 35, "35", 36, "36", 37, "37"):
-			details = {**(details or {}), "platform_code": response.get("__cli_platform_code__", int(response["code"]))}
+		from boss_agent_cli.api.error_evidence import evidence_for_response, merge_evidence
+
+		# 只在结构化字段上保留 platform_code。文案里的 37 不会从这里补成上游码。
+		details = merge_evidence(details, evidence_for_response(response, envelope_code=code))
 	handle_error_output(
 		ctx,
 		command,
@@ -933,30 +935,110 @@ def handle_auth_errors(command_name: str) -> Callable[[Callable[..., Any]], Call
 						message=f"{command_name} 本地文件读写失败: {e}",
 					)
 				else:
-					handle_error_output(
-						ctx,
-						command_name,
-						code="NETWORK_ERROR",
-						message=f"{command_name} 失败: {e}",
-						recoverable=True,
-						recovery_action="重试",
-						hints=_with_httpx_only_hint(ctx, None),
+					from boss_agent_cli.api.error_evidence import (
+						is_kernel_missing_message,
+						kernel_missing_details,
+						transport_details_from_exception,
 					)
+
+					if is_kernel_missing_message(e):
+						kernel_recoverable, kernel_action = error_contract_for_code("BROWSER_KERNEL_MISSING")
+						handle_error_output(
+							ctx,
+							command_name,
+							code="BROWSER_KERNEL_MISSING",
+							message=f"{command_name} 失败: {e}",
+							recoverable=kernel_recoverable,
+							recovery_action=kernel_action,
+							details=kernel_missing_details(),
+							hints={
+								"next_actions": [boss_command_for_ctx(ctx, "doctor", include_data_dir=True)],
+								"operator_actions": [
+									"这是本机 headless 内核缺失，平台请求没有发出。",
+									"不要把它当成网络错误重试。本工具不会自动下载浏览器。",
+								],
+							},
+						)
+					else:
+						transport = transport_details_from_exception(e) or {
+							"origin": "transport",
+							"request_attempted": "unknown",
+							"request_sent": "unknown",
+							"response_received": "unknown",
+							"upstream": {"source": "none", "http_status": None, "code": None, "message": None},
+						}
+						handle_error_output(
+							ctx,
+							command_name,
+							code="NETWORK_ERROR",
+							message=f"{command_name} 失败: {e}",
+							recoverable=True,
+							recovery_action="重试",
+							details=transport,
+							hints=_with_httpx_only_hint(ctx, None),
+						)
 			except click.ClickException:
 				# 命令体里抛出的参数校验（如 mark 的 --label）仍是用法错误：交给
 				# BossCliGroup 出 INVALID_PARAM 信封，不能兜成「可重试的 NETWORK_ERROR」，
 				# 否则 Agent 会拿同一个非法值反复重试。
 				raise
 			except Exception as e:
-				handle_error_output(
-					ctx,
-					command_name,
-					code="NETWORK_ERROR",
-					message=f"{command_name} 失败: {e}",
-					recoverable=True,
-					recovery_action="重试",
-					hints=_with_httpx_only_hint(ctx, None),
+				from boss_agent_cli.api.error_evidence import (
+					BrowserKernelMissing,
+					BrowserStartupError,
+					is_kernel_missing_message,
+					kernel_missing_details,
+					transport_details_from_exception,
+					unknown_failure_details,
 				)
+
+				if isinstance(e, BrowserKernelMissing) or is_kernel_missing_message(e):
+					kernel_recoverable, kernel_action = error_contract_for_code("BROWSER_KERNEL_MISSING")
+					raw_details = getattr(e, "details", None)
+					details = raw_details if isinstance(raw_details, dict) else kernel_missing_details()
+					handle_error_output(
+						ctx,
+						command_name,
+						code="BROWSER_KERNEL_MISSING",
+						message=f"{command_name} 失败: {e}",
+						recoverable=kernel_recoverable,
+						recovery_action=kernel_action,
+						details=details,
+						hints={
+							"next_actions": [boss_command_for_ctx(ctx, "doctor", include_data_dir=True)],
+							"operator_actions": [
+								"这是本机 headless 内核缺失，平台请求没有发出。",
+								"不要把它当成网络错误重试。本工具不会自动下载浏览器；需要时由你本机显式执行 patchright install chromium，安装完成前不要重试同一条命令。",
+							],
+						},
+					)
+				elif isinstance(e, BrowserStartupError):
+					start_recoverable, start_action = error_contract_for_code("BROWSER_START_FAILED")
+					handle_error_output(
+						ctx,
+						command_name,
+						code="BROWSER_START_FAILED",
+						message=str(e),
+						recoverable=start_recoverable,
+						recovery_action=start_action,
+						details=e.details,
+						hints={
+							"next_actions": [boss_command_for_ctx(ctx, "doctor", include_data_dir=True)],
+							"operator_actions": ["浏览器没有启动，平台请求没有发出。不要自动重试。"],
+						},
+					)
+				else:
+					network_recoverable, network_action = error_contract_for_code("NETWORK_ERROR")
+					handle_error_output(
+						ctx,
+						command_name,
+						code="NETWORK_ERROR",
+						message=f"{command_name} 失败: {e}",
+						recoverable=network_recoverable,
+						recovery_action=network_action,
+						details=transport_details_from_exception(e) or unknown_failure_details(),
+						hints=_with_httpx_only_hint(ctx, None),
+					)
 
 		return wrapper
 

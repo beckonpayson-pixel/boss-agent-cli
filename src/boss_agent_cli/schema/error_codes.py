@@ -129,6 +129,11 @@ ERROR_CODES: dict[str, dict[str, Any]] = {
 		"recoverable": True,
 		"recovery_action": "patchright install chromium",
 	},
+	"BROWSER_START_FAILED": {
+		"message": "浏览器进程没有启动，平台请求未发出",
+		"recoverable": False,
+		"recovery_action": "不要自动重试：先执行 boss doctor 检查本机浏览器依赖，修好后由你手动再运行原命令",
+	},
 	"BROWSER_NAV_TIMEOUT": {
 		"message": "浏览器首页导航超时",
 		"recoverable": True,
