@@ -1067,9 +1067,15 @@ def run_search_pipeline(
 			code, message = client.parse_error(raw)
 			details = None
 			if isinstance(raw, dict):
+				from boss_agent_cli.api.error_evidence import evidence_for_response, merge_evidence
+
 				error = raw.get("error")
 				if isinstance(error, dict) and isinstance(error.get("details"), dict):
 					details = error["details"]
+				cli_details = raw.get("__cli_error_details__")
+				if details is None and isinstance(cli_details, dict):
+					details = dict(cli_details)
+				details = merge_evidence(details, evidence_for_response(raw, envelope_code=code))
 			raise SearchPipelinePlatformError(code, message or "搜索结果获取失败", details=details)
 		platform_data = _unwrap_platform_data(client, raw)
 		job_list = field_list(platform_data, "jobList")

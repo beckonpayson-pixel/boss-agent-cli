@@ -254,7 +254,8 @@ class _BaseHttpClient:
 		try:
 			raise_platform_risk_response(response, is_cdp=getattr(browser, "_is_cdp", False) is True)
 		except PlatformRiskError as error:
-			error.details["platform_code"] = response.get("__cli_platform_code__", int(response["code"]))
+			# 不根据 code 字段再 int() 一次：缺结构化码时保持 null，正文里的 37 不能补成业务码。
+			error.details.setdefault("platform_code", None)
 			self._record_cdp_risk_lock(browser, error=error)
 			raise
 
@@ -406,8 +407,17 @@ class _BaseHttpClient:
 				data = payload if isinstance(payload, dict) else None
 				from boss_agent_cli.api.client import AccountRiskError, PlatformRiskError
 
-				if data is not None:
-					self._raise_platform_risk_response(data)
+				if isinstance(data, dict):
+					status_code = getattr(resp, "status_code", None)
+					if isinstance(status_code, int) and not isinstance(status_code, bool):
+						data["__cli_http_status__"] = status_code
+					data["__cli_evidence_source__"] = "upstream_json"
+					from boss_agent_cli.api.error_evidence import stash_transport_evidence
+
+					try:
+						self._raise_platform_risk_response(data)
+					finally:
+						stash_transport_evidence(data)
 				try:
 					try:
 						final_url = str(resp.url)
@@ -421,10 +431,45 @@ class _BaseHttpClient:
 					)
 					if page_risk is not None:
 						raise_platform_risk_response(page_risk)
+					if data is None:
+						from boss_agent_cli.api.client import EnvironmentRiskError
+						from boss_agent_cli.api.error_evidence import inference_details, strong_environment_text
+
+						snippet = ""
+						try:
+							snippet = resp.text[:2048]
+						except Exception:
+							snippet = ""
+						if isinstance(snippet, str) and strong_environment_text(snippet):
+							status_code = getattr(resp, "status_code", None)
+							synthetic: dict[str, Any] = {
+								"code": -1,
+								"message": snippet,
+								"__cli_evidence_source__": "non_json",
+							}
+							if isinstance(status_code, int) and not isinstance(status_code, bool):
+								synthetic["__cli_http_status__"] = status_code
+							raise EnvironmentRiskError(
+								"平台响应不是 JSON，但文本命中环境异常表述；已停止且不记录为上游 code",
+								details=inference_details(synthetic),
+							)
 					if resp.status_code == 403:
 						raise AccountRiskError(
 							"平台拒绝访问 (HTTP 403)，未自动刷新或重试；请在官方页面核实当前会话",
-							details={"platform_code": None, "http_status": 403},
+							details={
+								"platform_code": None,
+								"http_status": 403,
+								"origin": "http",
+								"request_attempted": True,
+								"request_sent": True,
+								"response_received": True,
+								"upstream": {
+									"source": "http",
+									"http_status": 403,
+									"code": None,
+									"message": None,
+								},
+							},
 						)
 				except PlatformRiskError as error:
 					self._record_cdp_risk_lock(error=error)

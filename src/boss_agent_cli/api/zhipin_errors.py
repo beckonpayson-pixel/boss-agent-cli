@@ -135,9 +135,12 @@ def raise_platform_risk_response(response: dict[str, Any], *, is_cdp: bool = Fal
 	"""在解包、刷新或降级前抛出平台风险；普通失败仍交给原调用者处理。"""
 	# 惰性导入避免 client → zhipin_errors 的模块初始化环。
 	from boss_agent_cli.api.client import AccountRiskError, EnvironmentRiskError
+	from boss_agent_cli.api.error_evidence import risk_details_from_response
 
 	code = normalize_risk_code(response.get("code"))
-	details: dict[str, Any] = {"platform_code": normalize_risk_code(response.get("__cli_platform_code__", code))}
+	details = risk_details_from_response(response)
+	# 没有结构化码时显式 null，避免调用方把缺字段读成 37。
+	details.setdefault("platform_code", None)
 	if response.get("__cli_risk_source__") in ("access_restricted_page", "security_page"):
 		details["risk_source"] = response["__cli_risk_source__"]
 	if path := response.get("path"):
@@ -150,5 +153,12 @@ def raise_platform_risk_response(response: dict[str, Any], *, is_cdp: bool = Fal
 	if code == CODE_IP_RESTRICTED or (code == 37 and classify_code_37(response) == "environment_risk"):
 		raise EnvironmentRiskError(
 			response_message(response) or "平台访问环境风险", is_cdp=is_cdp,
+			details=details,
+		)
+	# 没有结构化风险码时，只对明确的环境异常表述停机。正文里出现数字 37 不会变成 platform_code。
+	if details.get("origin") == "tool_inference":
+		raise EnvironmentRiskError(
+			"平台响应文本命中环境异常表述，但没有结构化业务码；已停止且不记录为上游 code",
+			is_cdp=is_cdp,
 			details=details,
 		)

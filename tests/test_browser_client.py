@@ -207,6 +207,7 @@ def test_close_then_restart_does_not_reuse_previous_channel_state(initial_cdp):
 
 	with (
 		patch("boss_agent_cli.api.browser_client.sync_playwright") as mock_playwright,
+		patch("boss_agent_cli.services.browser_runtime.prove_headless_shell_missing", return_value=None),
 		patch.object(session, "_try_cdp", return_value=False) if initial_cdp else patch.object(
 			BrowserSession, "_read_devtools_active_port", return_value=None
 		),
@@ -279,8 +280,12 @@ def test_try_connect_creates_new_context_when_none_exists():
 	assert any(c["name"] == "wt2" for c in cookies_arg)
 
 
-def test_start_headless_tolerates_networkidle_timeout():
+def test_start_headless_tolerates_networkidle_timeout(monkeypatch):
 	"""Headless 预热不应因 networkidle 等待超时而直接失败。"""
+	monkeypatch.setattr(
+		"boss_agent_cli.services.browser_runtime.prove_headless_shell_missing",
+		lambda **_kwargs: None,
+	)
 	logger = MagicMock()
 	session = BrowserSession(cookies={"wt2": "abc"}, user_agent="UA", logger=logger)
 	session._pw = MagicMock()
@@ -743,7 +748,11 @@ def test_navigate_home_does_not_reset_a_security_page():
 	page.goto.assert_called_once_with(HOME_URL, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS)
 
 
-def test_start_headless_raises_navigation_error_instead_of_raw_goto_timeout():
+def test_start_headless_raises_navigation_error_instead_of_raw_goto_timeout(monkeypatch):
+	monkeypatch.setattr(
+		"boss_agent_cli.services.browser_runtime.prove_headless_shell_missing",
+		lambda **_kwargs: None,
+	)
 	session = BrowserSession(cookies={"wt2": "abc"}, user_agent="UA")
 	session._pw = MagicMock()
 	browser = MagicMock()
